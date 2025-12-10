@@ -162,6 +162,18 @@ export default function HomePage() {
         clearInterval(intervalRef.current)
         intervalRef.current = null
       }
+      
+      // Stop service worker notifications
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.ready.then((registration) => {
+          if (registration.active) {
+            registration.active.postMessage({
+              type: "STOP_NOTIFICATIONS",
+            })
+          }
+        })
+      }
+      
       localStorage.removeItem("isSubscribed")
       setIsSubscribed(false)
       toast({
@@ -184,13 +196,34 @@ export default function HomePage() {
     }
   }
 
-  const scheduleNotifications = (intervalMinutes: number) => {
-    const intervalMs = intervalMinutes * 60 * 1000
-
+  const scheduleNotifications = async (intervalMinutes: number) => {
+    // Clear any existing interval
     if (intervalRef.current) {
       clearInterval(intervalRef.current)
+      intervalRef.current = null
     }
 
+    // Try to use service worker for better background support
+    if ("serviceWorker" in navigator) {
+      try {
+        const registration = await navigator.serviceWorker.ready
+        
+        // Send message to service worker to start notifications
+        if (registration.active) {
+          registration.active.postMessage({
+            type: "START_NOTIFICATIONS",
+            intervalMinutes: intervalMinutes,
+          })
+        }
+      } catch (error) {
+        console.error("Failed to communicate with service worker:", error)
+      }
+    }
+
+    // Fallback: Use setInterval if service worker communication fails
+    // Note: This only works when the app is open
+    const intervalMs = intervalMinutes * 60 * 1000
+    
     // Send first notification immediately
     sendNotification()
 
@@ -201,18 +234,39 @@ export default function HomePage() {
 
   const sendNotification = () => {
     if (Notification.permission === "granted") {
-      const notification = new Notification("Reminder Notification", {
-        body: `This is your scheduled reminder!`,
-        icon: "/icon-192x192.jpg",
-        badge: "/icon-192x192.jpg",
-        tag: "reminder",
-        requireInteraction: false,
-      })
-
-      notification.onclick = () => {
-        window.focus()
-        notification.close()
+      // Try to use service worker notification first (works better in background)
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.ready.then((registration) => {
+          registration.showNotification("Reminder Notification", {
+            body: `This is your scheduled reminder!`,
+            icon: "/icon-192x192.jpg",
+            badge: "/icon-192x192.jpg",
+            tag: "reminder",
+            requireInteraction: false,
+            ...(("vibrate" in navigator) && { vibrate: [200, 100, 200] }),
+          } as NotificationOptions)
+        }).catch(() => {
+          // Fallback to regular notification
+          showDirectNotification()
+        })
+      } else {
+        showDirectNotification()
       }
+    }
+  }
+
+  const showDirectNotification = () => {
+    const notification = new Notification("Reminder Notification", {
+      body: `This is your scheduled reminder!`,
+      icon: "/icon-192x192.jpg",
+      badge: "/icon-192x192.jpg",
+      tag: "reminder",
+      requireInteraction: false,
+    })
+
+    notification.onclick = () => {
+      window.focus()
+      notification.close()
     }
   }
 
@@ -336,6 +390,16 @@ export default function HomePage() {
                 <div className="p-4 bg-destructive/10 text-destructive rounded-lg">
                   <p className="text-sm font-medium">
                     Notifications are blocked. Please enable them in your browser settings.
+                  </p>
+                </div>
+              )}
+
+              {isSubscribed && (
+                <div className="p-4 bg-blue-500/10 text-blue-700 dark:text-blue-400 rounded-lg">
+                  <p className="text-sm font-medium">
+                    ⚠️ Important: Notifications work best when the app is open or in the background. 
+                    For true background notifications (when app is closed), a backend server with Push API is required.
+                    {isIOS && !isStandalone && " On iOS, install the app to your home screen for better reliability."}
                   </p>
                 </div>
               )}
