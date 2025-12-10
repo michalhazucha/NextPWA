@@ -21,25 +21,59 @@ export default function HomePage() {
   const [isSupported, setIsSupported] = useState(false)
   const [permission, setPermission] = useState<NotificationPermission>("default")
   const [isSubscribed, setIsSubscribed] = useState(false)
-  const [interval, setInterval] = useState("15")
+  const [interval, setNotificationInterval] = useState("15")
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null)
   const [isInstallable, setIsInstallable] = useState(false)
-  const intervalRef = useRef<NodeJS.Timeout | null>(null)
+  const [isIOS, setIsIOS] = useState(false)
+  const [isStandalone, setIsStandalone] = useState(false)
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const { toast } = useToast()
 
   useEffect(() => {
-    if ("Notification" in window && "serviceWorker" in navigator) {
-      setIsSupported(true)
-      setPermission(Notification.permission)
+    // Detect iOS
+    const isIOSDevice = /iPad|iPhone|iPod/.test(navigator.userAgent) || 
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+    setIsIOS(isIOSDevice)
+
+    // Check if app is running as standalone PWA
+    const standalone = (window.navigator as any).standalone || 
+      window.matchMedia('(display-mode: standalone)').matches
+    setIsStandalone(standalone)
+
+    // Check for service worker support (PWA)
+    const hasServiceWorker = "serviceWorker" in navigator
+    
+    // Check for Notification API support
+    const hasNotification = "Notification" in window
+
+    // On iOS, notifications only work when installed as PWA
+    // On other platforms, both service worker and notification are needed
+    if (isIOSDevice) {
+      // iOS: Service worker is supported, but notifications need PWA installation
+      if (hasServiceWorker) {
+        setIsSupported(true)
+        if (hasNotification && standalone) {
+          setPermission(Notification.permission)
+        } else if (hasNotification) {
+          // Notification API exists but app not installed - set to default
+          setPermission("default")
+        }
+      }
+    } else {
+      // Other platforms: Need both service worker and notification
+      if (hasServiceWorker && hasNotification) {
+        setIsSupported(true)
+        setPermission(Notification.permission)
+      }
     }
 
     // Check if already subscribed
     const savedInterval = localStorage.getItem("notificationInterval")
     const subscribed = localStorage.getItem("isSubscribed") === "true"
-    if (savedInterval) setInterval(savedInterval)
+    if (savedInterval) setNotificationInterval(savedInterval)
     if (subscribed) setIsSubscribed(true)
 
-    // Listen for install prompt
+    // Listen for install prompt (Android/Chrome)
     const handleBeforeInstallPrompt = (e: Event) => {
       e.preventDefault()
       setDeferredPrompt(e)
@@ -64,9 +98,27 @@ export default function HomePage() {
 
   const requestPermission = async () => {
     if (!isSupported) {
+      if (isIOS && !isStandalone) {
+        toast({
+          title: "Install Required",
+          description: "Please install this app to your home screen to enable notifications. Tap the share button and select 'Add to Home Screen'.",
+          variant: "destructive",
+        })
+      } else {
+        toast({
+          title: "Not supported",
+          description: "Push notifications are not supported in your browser",
+          variant: "destructive",
+        })
+      }
+      return
+    }
+
+    // On iOS, notifications only work when installed as PWA
+    if (isIOS && !isStandalone) {
       toast({
-        title: "Not supported",
-        description: "Push notifications are not supported in your browser",
+        title: "Install Required",
+        description: "Please install this app to your home screen to enable notifications. Tap the share button and select 'Add to Home Screen'.",
         variant: "destructive",
       })
       return
@@ -165,7 +217,7 @@ export default function HomePage() {
   }
 
   const handleIntervalChange = (value: string) => {
-    setInterval(value)
+    setNotificationInterval(value)
     if (isSubscribed) {
       localStorage.setItem("notificationInterval", value)
       scheduleNotifications(Number.parseInt(value))
@@ -211,7 +263,17 @@ export default function HomePage() {
         <CardContent className="space-y-6">
           {!isSupported ? (
             <div className="p-4 bg-destructive/10 text-destructive rounded-lg">
-              <p className="text-sm font-medium">Your browser doesn&apos;t support push notifications</p>
+              <p className="text-sm font-medium">
+                {isIOS 
+                  ? "Please install this app to your home screen to enable notifications. Tap the share button and select 'Add to Home Screen'."
+                  : "Your browser doesn't support push notifications"}
+              </p>
+            </div>
+          ) : isIOS && !isStandalone ? (
+            <div className="p-4 bg-yellow-500/10 text-yellow-700 dark:text-yellow-400 rounded-lg">
+              <p className="text-sm font-medium">
+                Install this app to enable notifications: Tap the share button (square with arrow) and select &quot;Add to Home Screen&quot;
+              </p>
             </div>
           ) : (
             <>
