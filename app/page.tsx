@@ -304,7 +304,7 @@ export default function HomePage() {
       <Card className="w-full max-w-md">
         <CardHeader>
           <div className="flex items-center justify-between">
-            <CardTitle className="text-3xl font-bold">Notify Me</CardTitle>
+            <CardTitle className="text-3xl font-bold bg-red-600 text-white">Notify Me</CardTitle>
             {isInstallable && (
               <Button onClick={handleInstallClick} size="sm" variant="outline" className="gap-2 bg-transparent">
                 <Download className="h-4 w-4" />
