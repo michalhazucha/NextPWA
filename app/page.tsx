@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
+import Link from "next/link"
 import { Bell, BellOff, Download } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -8,6 +9,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useToast } from "@/hooks/use-toast"
 import { Toaster } from "@/components/ui/toaster"
+import { getFCMToken, onMessageListener } from "@/lib/firebase"
 
 const INTERVALS = [
   { value: "1", label: "Every minute" },
@@ -82,17 +84,50 @@ export default function HomePage() {
 
     window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt)
 
+    // Restore notification schedule when app comes back to foreground
+    const handleVisibilityChange = () => {
+      if (!document.hidden && isSubscribed && interval) {
+        // App came back to foreground - restore schedule in service worker
+        if ("serviceWorker" in navigator) {
+          navigator.serviceWorker.ready.then((registration) => {
+            if (registration.active) {
+              registration.active.postMessage({
+                type: "START_NOTIFICATIONS",
+                intervalMinutes: Number.parseInt(interval),
+              })
+            }
+          })
+        }
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+    window.addEventListener("focus", handleVisibilityChange)
+
     return () => {
       window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt)
+      document.removeEventListener("visibilitychange", handleVisibilityChange)
+      window.removeEventListener("focus", handleVisibilityChange)
       if (intervalRef.current) {
         clearInterval(intervalRef.current)
       }
     }
-  }, [])
+  }, [isSubscribed, interval])
 
   useEffect(() => {
     if (isSubscribed && permission === "granted") {
       scheduleNotifications(Number.parseInt(interval))
+      
+      // Listen for foreground FCM messages
+      onMessageListener().then((payload: any) => {
+        if (payload) {
+          console.log("Foreground message received:", payload)
+          toast({
+            title: payload?.notification?.title || "Notification",
+            description: payload?.notification?.body || "You have a new notification",
+          })
+        }
+      })
     }
   }, [isSubscribed, permission, interval])
 
@@ -150,6 +185,61 @@ export default function HomePage() {
     }
   }
 
+  const subscribeToBackend = async (fcmToken: string, intervalMinutes: number) => {
+    // TODO: Replace with your backend API endpoint
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001/api/subscribe"
+    
+    try {
+      const response = await fetch(backendUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          token: fcmToken,
+          intervalMinutes: intervalMinutes,
+        }),
+      })
+      
+      if (!response.ok) {
+        throw new Error("Failed to subscribe to backend")
+      }
+      
+      console.log("Successfully subscribed to backend")
+      return true
+    } catch (error) {
+      console.error("Error subscribing to backend:", error)
+      return false
+    }
+  }
+
+  const unsubscribeFromBackend = async (fcmToken: string) => {
+    // TODO: Replace with your backend API endpoint
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001/api/unsubscribe"
+    
+    try {
+      const response = await fetch(backendUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          token: fcmToken,
+        }),
+      })
+      
+      if (!response.ok) {
+        throw new Error("Failed to unsubscribe from backend")
+      }
+      
+      console.log("Successfully unsubscribed from backend")
+      return true
+    } catch (error) {
+      console.error("Error unsubscribing from backend:", error)
+      return false
+    }
+  }
+
   const toggleNotifications = async () => {
     if (permission !== "granted") {
       await requestPermission()
@@ -170,8 +260,18 @@ export default function HomePage() {
             registration.active.postMessage({
               type: "STOP_NOTIFICATIONS",
             })
+            console.log("Notifications stopped")
           }
+        }).catch((error) => {
+          console.error("Failed to stop notifications:", error)
         })
+      }
+      
+      // Unsubscribe from backend (FCM)
+      const fcmToken = localStorage.getItem("fcmToken")
+      if (fcmToken) {
+        await unsubscribeFromBackend(fcmToken)
+        localStorage.removeItem("fcmToken")
       }
       
       localStorage.removeItem("isSubscribed")
@@ -182,17 +282,53 @@ export default function HomePage() {
       })
     } else {
       // Subscribe
-      localStorage.setItem("isSubscribed", "true")
-      localStorage.setItem("notificationInterval", interval)
-      setIsSubscribed(true)
+      try {
+        // Get FCM token
+        const fcmToken = await getFCMToken()
+        
+        if (!fcmToken) {
+          toast({
+            title: "Error",
+            description: "Failed to get push notification token. Please check Firebase configuration.",
+            variant: "destructive",
+          })
+          return
+        }
+        
+        // Store FCM token
+        localStorage.setItem("fcmToken", fcmToken)
+        
+        // Subscribe to backend
+        const intervalMinutes = Number.parseInt(interval)
+        const subscribed = await subscribeToBackend(fcmToken, intervalMinutes)
+        
+        if (!subscribed) {
+          toast({
+            title: "Warning",
+            description: "Failed to connect to backend. Notifications may not work while using other apps.",
+            variant: "destructive",
+          })
+        }
+        
+        localStorage.setItem("isSubscribed", "true")
+        localStorage.setItem("notificationInterval", interval)
+        setIsSubscribed(true)
 
-      // Schedule notifications
-      scheduleNotifications(Number.parseInt(interval))
+        // Also schedule local notifications as fallback
+        scheduleNotifications(intervalMinutes)
 
-      toast({
-        title: "Notifications enabled",
-        description: `You will receive notifications every ${INTERVALS.find((i) => i.value === interval)?.label.toLowerCase()}`,
-      })
+        toast({
+          title: "Notifications enabled",
+          description: `You will receive notifications every ${INTERVALS.find((i) => i.value === interval)?.label.toLowerCase()}`,
+        })
+      } catch (error) {
+        console.error("Error enabling notifications:", error)
+        toast({
+          title: "Error",
+          description: "Failed to enable notifications. Please try again.",
+          variant: "destructive",
+        })
+      }
     }
   }
 
@@ -203,7 +339,7 @@ export default function HomePage() {
       intervalRef.current = null
     }
 
-    // Try to use service worker for better background support
+    // Use service worker for notifications (works better in background)
     if ("serviceWorker" in navigator) {
       try {
         const registration = await navigator.serviceWorker.ready
@@ -214,44 +350,43 @@ export default function HomePage() {
             type: "START_NOTIFICATIONS",
             intervalMinutes: intervalMinutes,
           })
+          console.log(`Notifications scheduled: every ${intervalMinutes} minute(s)`)
+        } else {
+          // Wait for service worker to activate
+          await navigator.serviceWorker.register("/sw.js")
+          const newRegistration = await navigator.serviceWorker.ready
+          if (newRegistration.active) {
+            newRegistration.active.postMessage({
+              type: "START_NOTIFICATIONS",
+              intervalMinutes: intervalMinutes,
+            })
+          }
         }
       } catch (error) {
         console.error("Failed to communicate with service worker:", error)
+        // Fallback only if service worker completely fails
+        const intervalMs = intervalMinutes * 60 * 1000
+        sendNotification()
+        intervalRef.current = setInterval(() => {
+          sendNotification()
+        }, intervalMs)
       }
-    }
-
-    // Fallback: Use setInterval if service worker communication fails
-    // Note: This only works when the app is open
-    const intervalMs = intervalMinutes * 60 * 1000
-    
-    // Send first notification immediately
-    sendNotification()
-
-    intervalRef.current = setInterval(() => {
+    } else {
+      // Fallback: Use setInterval if service worker not supported
+      const intervalMs = intervalMinutes * 60 * 1000
       sendNotification()
-    }, intervalMs)
+      intervalRef.current = setInterval(() => {
+        sendNotification()
+      }, intervalMs)
+    }
   }
 
   const sendNotification = () => {
+    // Don't send notifications directly from the page
+    // Let the service worker handle all notifications to avoid duplicates
+    // This function is only used as a fallback if service worker fails
     if (Notification.permission === "granted") {
-      // Try to use service worker notification first (works better in background)
-      if ("serviceWorker" in navigator) {
-        navigator.serviceWorker.ready.then((registration) => {
-          registration.showNotification("Reminder Notification", {
-            body: `This is your scheduled reminder!`,
-            icon: "/icon-192x192.jpg",
-            badge: "/icon-192x192.jpg",
-            tag: "reminder",
-            requireInteraction: false,
-            ...(("vibrate" in navigator) && { vibrate: [200, 100, 200] }),
-          } as NotificationOptions)
-        }).catch(() => {
-          // Fallback to regular notification
-          showDirectNotification()
-        })
-      } else {
-        showDirectNotification()
-      }
+      showDirectNotification()
     }
   }
 
@@ -315,6 +450,14 @@ export default function HomePage() {
           <CardDescription>Get push notifications at your chosen interval</CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
+          <div className="flex flex-wrap gap-3">
+            <Button asChild variant="outline">
+              <Link href="/sign">Podpísať PDF</Link>
+            </Button>
+            <Button asChild variant="outline">
+              <Link href="/scan">Skenovať QR kód</Link>
+            </Button>
+          </div>
           {!isSupported ? (
             <div className="p-4 bg-destructive/10 text-destructive rounded-lg">
               <p className="text-sm font-medium">
@@ -326,7 +469,14 @@ export default function HomePage() {
           ) : isIOS && !isStandalone ? (
             <div className="p-4 bg-yellow-500/10 text-yellow-700 dark:text-yellow-400 rounded-lg">
               <p className="text-sm font-medium">
-                Install this app to enable notifications: Tap the share button (square with arrow) and select &quot;Add to Home Screen&quot;
+                <strong>📱 Install Required for iOS:</strong>
+                <br />To enable push notifications that work while using other apps:
+                <br />1. Tap the Share button (square with arrow) at the bottom
+                <br />2. Scroll down and select &quot;Add to Home Screen&quot;
+                <br />3. Tap &quot;Add&quot;
+                <br />4. Open the app from your home screen
+                <br /><br />
+                <strong>With backend API:</strong> Once installed, notifications will work even when using Instagram or other apps! ✅
               </p>
             </div>
           ) : (
@@ -397,9 +547,34 @@ export default function HomePage() {
               {isSubscribed && (
                 <div className="p-4 bg-blue-500/10 text-blue-700 dark:text-blue-400 rounded-lg">
                   <p className="text-sm font-medium">
-                    ⚠️ Important: Notifications work best when the app is open or in the background. 
-                    For true background notifications (when app is closed), a backend server with Push API is required.
-                    {isIOS && !isStandalone && " On iOS, install the app to your home screen for better reliability."}
+                    {isIOS && !isStandalone ? (
+                      <>
+                        📱 <strong>iOS Installation Required:</strong> For notifications to work while using other apps, please install this app:
+                        <br />1. Tap the Share button (square with arrow)
+                        <br />2. Select &quot;Add to Home Screen&quot;
+                        <br />3. Open the app from your home screen
+                        <br /><br />
+                        <strong>With backend API:</strong> Once installed, notifications will work even when using other apps! ✅
+                      </>
+                    ) : isIOS && isStandalone ? (
+                      <>
+                        ✅ <strong>iOS PWA Installed:</strong> With backend API configured, notifications will work:
+                        <br />• While using other apps (Instagram, etc.) ✅
+                        <br />• When app is closed ✅
+                        <br />• When device is locked ✅
+                        <br /><br />
+                        <strong>Note:</strong> Make sure your backend API is running and configured correctly.
+                      </>
+                    ) : (
+                      <>
+                        ✅ <strong>Android/Desktop:</strong> With backend API configured, notifications will work:
+                        <br />• While using other apps ✅
+                        <br />• When app is closed ✅
+                        <br />• When device is locked ✅
+                        <br /><br />
+                        <strong>Note:</strong> Make sure your backend API is running and configured correctly.
+                      </>
+                    )}
                   </p>
                 </div>
               )}

@@ -1,9 +1,10 @@
 const CACHE_NAME = "notify-me-v1"
 const urlsToCache = ["/", "/icon-192x192.jpg", "/icon-512x512.jpg"]
 
-// Store notification interval
+// Store notification schedule state
 let notificationInterval = null
-let notificationTimer = null
+let nextNotificationTime = null
+let checkInterval = null
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -46,32 +47,60 @@ self.addEventListener("message", (event) => {
     startNotificationSchedule(intervalMinutes)
   } else if (event.data && event.data.type === "STOP_NOTIFICATIONS") {
     stopNotificationSchedule()
+  } else if (event.data && event.data.type === "CHECK_SCHEDULE") {
+    // Respond with current schedule status
+    event.ports[0].postMessage({
+      interval: notificationInterval,
+      nextTime: nextNotificationTime,
+    })
   }
 })
 
-// Start notification schedule
+// Start notification schedule using timestamp-based approach
 const startNotificationSchedule = (intervalMinutes) => {
   stopNotificationSchedule() // Clear any existing schedule
   
   notificationInterval = intervalMinutes
   const intervalMs = intervalMinutes * 60 * 1000
   
+  // Set next notification time (immediately)
+  nextNotificationTime = Date.now()
+  
   // Send first notification immediately
   showNotification()
   
-  // Schedule recurring notifications
-  notificationTimer = setInterval(() => {
+  // Update next notification time
+  nextNotificationTime = Date.now() + intervalMs
+  
+  // Check every 10 seconds if it's time for a notification
+  // This approach works better in background than setInterval
+  checkInterval = setInterval(() => {
+    checkAndSendNotification(intervalMs)
+  }, 10000) // Check every 10 seconds
+}
+
+// Check if it's time to send a notification
+const checkAndSendNotification = (intervalMs) => {
+  if (!nextNotificationTime || !notificationInterval) return
+  
+  const now = Date.now()
+  
+  // If we've passed the scheduled time, send notification
+  if (now >= nextNotificationTime) {
     showNotification()
-  }, intervalMs)
+    // Schedule next notification
+    nextNotificationTime = now + intervalMs
+  }
 }
 
 // Stop notification schedule
 const stopNotificationSchedule = () => {
-  if (notificationTimer) {
-    clearInterval(notificationTimer)
-    notificationTimer = null
+  if (checkInterval) {
+    clearInterval(checkInterval)
+    checkInterval = null
   }
   notificationInterval = null
+  nextNotificationTime = null
 }
 
 // Show notification
@@ -107,6 +136,44 @@ self.addEventListener("notificationclick", (event) => {
         return clients.openWindow("/")
       }
     }),
+  )
+})
+
+// Handle push notifications from FCM (Firebase Cloud Messaging)
+self.addEventListener("push", (event) => {
+  console.log("Push event received:", event)
+  
+  let notificationData = {
+    title: "Reminder Notification",
+    body: "This is your scheduled reminder!",
+    icon: "/icon-192x192.jpg",
+    badge: "/icon-192x192.jpg",
+    tag: "reminder",
+    requireInteraction: false,
+    vibrate: [200, 100, 200],
+  }
+  
+  // Parse push data if available
+  if (event.data) {
+    try {
+      const data = event.data.json()
+      if (data.notification) {
+        notificationData = {
+          ...notificationData,
+          ...data.notification,
+        }
+      }
+    } catch (e) {
+      // If not JSON, try text
+      const text = event.data.text()
+      if (text) {
+        notificationData.body = text
+      }
+    }
+  }
+  
+  event.waitUntil(
+    self.registration.showNotification(notificationData.title, notificationData)
   )
 })
 
