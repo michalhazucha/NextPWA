@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
+import { BrowserMultiFormatReader } from "@zxing/browser"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 
@@ -31,6 +32,11 @@ interface QrScanResult {
   parsed: ParsedQrValue
 }
 
+interface ZxingResult {
+  getText: () => string
+  getBarcodeFormat: () => { toString: () => string }
+}
+
 const parseQrValue = (value: string): ParsedQrValue => {
   try {
     const json = JSON.parse(value) as unknown
@@ -52,12 +58,13 @@ export default function ScanQrPage() {
   const streamRef = useRef<MediaStream | null>(null)
   const rafRef = useRef<number | null>(null)
   const detectorRef = useRef<BarcodeDetectorInstance | null>(null)
+  const zxingRef = useRef<BrowserMultiFormatReader | null>(null)
 
   const [isScanning, setIsScanning] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [scanResult, setScanResult] = useState<QrScanResult | null>(null)
 
-  const isDetectorSupported = useMemo(() => {
+  const hasBarcodeDetector = useMemo(() => {
     return typeof window !== "undefined" && "BarcodeDetector" in window
   }, [])
 
@@ -75,6 +82,10 @@ export default function ScanQrPage() {
       streamRef.current = null
     }
     detectorRef.current = null
+    if (zxingRef.current) {
+      zxingRef.current.reset()
+      zxingRef.current = null
+    }
     setIsScanning(false)
   }, [])
 
@@ -106,7 +117,7 @@ export default function ScanQrPage() {
       }
     } catch (error) {
       console.error("QR scan failed:", error)
-  setErrorMessage("Skenovanie zlyhalo. Skús to znova alebo obnov stránku.")
+      setErrorMessage("Skenovanie zlyhalo. Skús to znova alebo obnov stránku.")
       stopScan()
       return
     }
@@ -114,16 +125,44 @@ export default function ScanQrPage() {
     rafRef.current = requestAnimationFrame(startScanLoop)
   }, [handleDetection, stopScan])
 
+  const startScanWithZxing = useCallback(async () => {
+    const reader = new BrowserMultiFormatReader()
+    zxingRef.current = reader
+
+    try {
+      setIsScanning(true)
+      await reader.decodeFromVideoDevice(
+        undefined,
+        videoRef.current || undefined,
+        (result, error) => {
+          if (result) {
+            const zxingResult = result as unknown as ZxingResult
+            handleDetection({
+              rawValue: zxingResult.getText(),
+              format: zxingResult.getBarcodeFormat()?.toString(),
+            })
+          } else if (error) {
+            // ZXing errors are expected during scanning
+          }
+        },
+      )
+    } catch (error) {
+      console.error("ZXing scan failed:", error)
+      setErrorMessage("Skenovanie zlyhalo. Skús to znova alebo obnov stránku.")
+      stopScan()
+    }
+  }, [handleDetection, stopScan])
+
   const startScan = useCallback(async () => {
     setErrorMessage(null)
     setScanResult(null)
 
-    if (!isDetectorSupported) {
-      setErrorMessage("Tento prehliadač nepodporuje skenovanie QR/čiarových kódov.")
-      return
-    }
-
     try {
+      if (!hasBarcodeDetector) {
+        await startScanWithZxing()
+        return
+      }
+
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: "environment" } },
         audio: false,
@@ -165,7 +204,7 @@ export default function ScanQrPage() {
       setErrorMessage("Nepodarilo sa spustiť kameru. Skontroluj povolenia.")
       stopScan()
     }
-  }, [isDetectorSupported, startScanLoop, stopScan])
+  }, [hasBarcodeDetector, startScanLoop, startScanWithZxing, stopScan])
 
   useEffect(() => () => stopScan(), [stopScan])
 
